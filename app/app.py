@@ -148,19 +148,25 @@ def query_df(sql: str, params=None) -> pd.DataFrame:
             conn.close()
 
 
-def run_cmd(sql: str, params=None) -> tuple:
-    """Выполнить INSERT / UPDATE / DELETE. Возвращает (успех: bool, ошибка: str|None)."""
+def run_cmd(sql: str, params=None, return_rowcount: bool = False) -> tuple:
+    """Выполнить INSERT / UPDATE / DELETE.
+
+    Возвращает (успех: bool, ошибка: str|None) либо, при return_rowcount=True,
+    (успех: bool, ошибка: str|None, затронуто_строк: int).
+    """
     conn = None
+    rowcount = 0
     try:
         conn = _open_conn()
         with conn.cursor() as cur:
             cur.execute(sql, params)
+            rowcount = cur.rowcount
         conn.commit()
-        return True, None
+        return (True, None, rowcount) if return_rowcount else (True, None)
     except Exception as exc:
         if conn:
             conn.rollback()
-        return False, str(exc)
+        return (False, str(exc), 0) if return_rowcount else (False, str(exc))
     finally:
         if conn:
             conn.close()
@@ -358,11 +364,13 @@ def page_tables() -> None:
         (limit, offset),
     )
 
-    shown_from = offset + 1
-    shown_to   = min(offset + limit, total)
+    if total == 0:
+        shown = "—"
+    else:
+        shown = f"{offset + 1}–{min(offset + limit, total)}"
     st.caption(
         f"Таблица **{TABLE_LABELS[tbl]}** · Всего строк: **{total}** · "
-        f"Показано: {shown_from}–{shown_to}"
+        f"Показано: {shown}"
     )
 
     if not data.empty:
@@ -766,7 +774,7 @@ def _report_employees() -> None:
                        COALESCE(e.middle_name, '')                        AS фио,
                    e.position                                             AS должность,
                    EXTRACT(YEAR FROM AGE(CURRENT_DATE, e.hire_date))::INT AS стаж_лет,
-                   COUNT(ca.flight_id)                                    AS рейсов_в_периоде
+                   COUNT(f.flight_id)                                     AS рейсов_в_периоде
             FROM employee e
             LEFT JOIN crew_assignment ca ON ca.employee_id = e.employee_id
             LEFT JOIN flight f           ON f.flight_id    = ca.flight_id
@@ -975,13 +983,15 @@ def _tab_assign_crew() -> None:
             if not crew_role:
                 st.error("Укажите роль в экипаже.")
             else:
-                ok, err = run_cmd("""
+                ok, err, affected = run_cmd("""
                     INSERT INTO crew_assignment (flight_id, employee_id, crew_role)
                     VALUES (%s, %s, %s)
                     ON CONFLICT (flight_id, employee_id) DO NOTHING;
-                """, (f_opts[f_label], e_opts[e_label], crew_role))
-                if ok:
+                """, (f_opts[f_label], e_opts[e_label], crew_role), return_rowcount=True)
+                if ok and affected:
                     st.success("✅ Сотрудник успешно назначен на рейс!")
+                elif ok:
+                    st.warning("⚠️ Этот сотрудник уже назначен на данный рейс.")
                 else:
                     st.error(f"❌ {err}")
 
@@ -1066,6 +1076,13 @@ def _tab_add_passenger() -> None:
         if key not in st.session_state:
             st.session_state[key] = ""
 
+    # Отложенная очистка полей после успешного добавления:
+    # сбрасываем ДО инстанцирования виджетов, иначе Streamlit бросит исключение.
+    if st.session_state.get("pax_clear"):
+        st.session_state["pax_phone"] = ""
+        st.session_state["pax_passport"] = ""
+        st.session_state["pax_clear"] = False
+
     c1, c2 = st.columns(2)
     last_name   = c1.text_input("Фамилия *")
     first_name  = c2.text_input("Имя *")
@@ -1127,9 +1144,8 @@ def _tab_add_passenger() -> None:
                 passport_no, birth_date, phone,
             ))
             if ok:
-                # Сбрасываем маскированные поля после успешного добавления
-                st.session_state["pax_phone"]    = ""
-                st.session_state["pax_passport"] = ""
+                # Сбрасываем маскированные поля на следующем прогоне (см. pax_clear выше)
+                st.session_state["pax_clear"] = True
                 st.success(f"✅ Пассажир **{last_name} {first_name}** добавлен!")
                 st.rerun()
             else:
