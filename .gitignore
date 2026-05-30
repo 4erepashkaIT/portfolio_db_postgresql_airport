@@ -1,0 +1,16 @@
+# Секреты и окружение
+.env
+.env.*
+
+# Виртуальное окружение Python
+.venv/
+venv/
+env/
+
+# Кэш Python
+__pycache__/
+*.pyc
+*.pyo
+
+# macOS мусор
+.DS_Store

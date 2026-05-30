@@ -1,0 +1,20 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: airport_postgres
+    restart: unless-stopped
+    env_file: .env
+    ports:
+      - "5432:5432"          # localhost:5432 → контейнер
+    volumes:
+      - pg_data:/var/lib/postgresql/data          # постоянное хранилище
+      - ./sql:/docker-entrypoint-initdb.d          # SQL-скрипты запустятся при первом старте
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d airport_db"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  pg_data:
+  
