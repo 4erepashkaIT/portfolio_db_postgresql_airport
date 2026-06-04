@@ -39,6 +39,9 @@ GRANT SELECT ON TABLE aircraft   TO cashier_user;   -- ← ИСПРАВЛЕНО:
 GRANT INSERT ON TABLE passenger  TO cashier_user;
 GRANT INSERT ON TABLE ticket     TO cashier_user;
 
+-- Отмена билетов (удаление)
+GRANT DELETE ON TABLE ticket     TO cashier_user;
+
 -- Изменение только телефона и паспорта пассажира
 GRANT UPDATE (phone, passport_no) ON TABLE passenger TO cashier_user;
 

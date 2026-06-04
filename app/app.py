@@ -120,6 +120,23 @@ ROLE_ALLOWED_QUERIES = {
     "Кассир":        [1, 2, 4, 6, 7, 8, 9, 10, 11, 12],  # без 3, 5, 13
 }
 
+# ── Стандартный список ролей в экипаже ────────────────────────────────
+CREW_ROLES = [
+    "командир воздушного судна",
+    "второй пилот",
+    "штурман",          # правдоподобная доп. роль
+    "бортинженер",      # правдоподобная доп. роль
+    "старший бортпроводник",
+    "бортпроводник",
+]
+
+# ── Список стран регистрации авиакомпаний ─────────────────────────────
+OTHER_COUNTRY = "Другая…"
+COUNTRIES = [
+    "Россия", "США", "Великобритания", "Германия", "Франция",
+    "Турция", "ОАЭ", "Китай", "Казахстан", OTHER_COUNTRY,
+]
+
 
 # ══════════════════════════════════════════════════════════════════════
 #  ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ БД
@@ -862,6 +879,7 @@ def page_manage() -> None:
         tab_defs += [
             ("✈️ Авиакомпания",       _tab_add_airline),
             ("🛩️ Самолёт",            _tab_add_aircraft),
+            ("👨‍✈️ Добавить сотрудника", _tab_add_employee),
         ]
 
     if not tab_defs:
@@ -905,7 +923,11 @@ def _tab_add_flight() -> None:
             else:
                 depart_at = datetime.combine(dep_date, dep_time)
                 arrive_at = datetime.combine(arr_date, arr_time)
-                if arrive_at <= depart_at:
+                if arr_date < dep_date:
+                    st.error("Дата прилёта не может быть раньше даты вылета.")
+                elif arr_date == dep_date and arr_time <= dep_time:
+                    st.error("При совпадении дат время прилёта должно быть позже времени вылета.")
+                elif arrive_at <= depart_at:
                     st.error("Время прилёта должно быть позже времени вылета.")
                 else:
                     ok, err = run_cmd("""
@@ -975,10 +997,7 @@ def _tab_assign_crew() -> None:
     with st.form("form_assign_crew"):
         f_label   = st.selectbox("Рейс",      list(f_opts.keys()))
         e_label   = st.selectbox("Сотрудник", list(e_opts.keys()))
-        crew_role = st.text_input(
-            "Роль в экипаже *",
-            placeholder="Например: КВС / Второй пилот / Бортпроводник 1",
-        )
+        crew_role = st.selectbox("Роль в экипаже *", CREW_ROLES)
         if st.form_submit_button("➕ Назначить", type="primary"):
             if not crew_role:
                 st.error("Укажите роль в экипаже.")
@@ -1068,6 +1087,25 @@ def _fmt_passport(key: str) -> None:
 
     st.session_state[key] = result
 
+
+def _fmt_ticket_no(key: str) -> None:
+    """Маска номера билета: только цифры, ровно 13 знаков (формат IATA).
+
+    Недостающие знаки дополняются нулями слева прямо в поле (видно в UI),
+    лишние цифры сверх 13 отбрасываются. Пустое поле остаётся пустым.
+    """
+    digits = re.sub(r"\D", "", st.session_state[key])[:13]
+    st.session_state[key] = digits.zfill(13) if digits else ""
+
+
+def _fmt_iata(key: str) -> None:
+    """Маска кода IATA: 2 алфавитно-цифровых символа (буквы/цифры), верхний регистр.
+
+    Коды вида S7, U6 допустимы, поэтому цифры не вырезаются.
+    """
+    st.session_state[key] = re.sub(r"[^A-Za-z0-9]", "", st.session_state[key]).upper()[:2]
+
+
 def _tab_add_passenger() -> None:
     st.subheader("👤 Зарегистрировать нового пассажира")
 
@@ -1154,6 +1192,18 @@ def _tab_add_passenger() -> None:
 
 def _tab_add_ticket() -> None:
     st.subheader("🎫 Продать билет")
+    st.caption(
+        "Продажа доступна на рейсы, которые ещё не вылетели; задержанные рейсы "
+        "остаются доступными и после исходного времени вылета. Отменённые и "
+        "выполненные рейсы в списке не показываются."
+    )
+
+    # Инициализация и отложенная очистка поля номера билета (см. pax_clear)
+    if "tkt_no" not in st.session_state:
+        st.session_state["tkt_no"] = ""
+    if st.session_state.get("tkt_clear"):
+        st.session_state["tkt_no"] = ""
+        st.session_state["tkt_clear"] = False
 
     passengers = query_df("""
         SELECT passenger_id, last_name, first_name, passport_no
@@ -1167,6 +1217,7 @@ def _tab_add_ticket() -> None:
         JOIN aircraft ac   ON ac.tail_number = f.tail_number
         LEFT JOIN ticket t ON t.flight_id    = f.flight_id
         WHERE f.status NOT IN ('отменён', 'выполнен')
+          AND (f.depart_at > NOW() OR f.status = 'задержан')
         GROUP BY f.flight_id, f.flight_number, f.city_from,
                  f.city_to, f.depart_at, ac.capacity
         HAVING ac.capacity - COUNT(t.ticket_no) > 0
@@ -1189,35 +1240,79 @@ def _tab_add_ticket() -> None:
         for _, r in avail_flights.iterrows()
     }
 
-    with st.form("form_add_ticket"):
-        c1, c2     = st.columns(2)
-        ticket_no  = c1.text_input("Номер билета *", placeholder="T000013")
-        p_label    = c2.selectbox("Пассажир *",  list(p_opts.keys()))
-        f_label    = c1.selectbox("Рейс *",      list(f_opts.keys()))
-        seat_no    = c2.text_input("Место *", placeholder="12A")
-        svc_class  = c1.selectbox("Класс", ["эконом", "бизнес", "первый"])
-        price      = c2.number_input(
-            "Цена (руб.) *", min_value=1.0, step=500.0, value=5000.0, format="%.2f"
-        )
-        purch_date = c1.date_input("Дата покупки", value=date.today())
+    # Виджеты вне st.form — чтобы маска номера билета срабатывала «вживую»
+    c1, c2     = st.columns(2)
+    c1.text_input(
+        "Номер билета *",
+        key="tkt_no",
+        max_chars=13,
+        placeholder="0000000000000",
+        on_change=_fmt_ticket_no,
+        args=("tkt_no",),
+        help="13 цифр (формат IATA). Недостающие знаки дополнятся нулями слева.",
+    )
+    p_label    = c2.selectbox("Пассажир *",  list(p_opts.keys()))
+    f_label    = c1.selectbox("Рейс *",      list(f_opts.keys()))
+    seat_no    = c2.text_input("Место *", placeholder="12A")
+    svc_class  = c1.selectbox("Класс", ["эконом", "бизнес", "первый"])
+    price      = c2.number_input(
+        "Цена (руб.) *", min_value=1.0, step=500.0, value=5000.0, format="%.2f"
+    )
+    purch_date = c1.date_input("Дата покупки", value=date.today())
 
-        if st.form_submit_button("💳 Продать билет", type="primary"):
-            if not all([ticket_no, seat_no]):
-                st.error("Заполните все обязательные поля (*)")
+    if st.button("💳 Продать билет", type="primary"):
+        ticket_no = st.session_state["tkt_no"]
+        if not ticket_no or not seat_no:
+            st.error("Заполните все обязательные поля (*)")
+        elif len(ticket_no) != 13:
+            st.error("Номер билета должен содержать ровно 13 цифр.")
+        else:
+            ok, err = run_cmd("""
+                INSERT INTO ticket
+                    (ticket_no, seat_no, service_class, price,
+                     purchase_date, passenger_id, flight_id)
+                VALUES (%s, %s, %s, %s, %s, %s, %s);
+            """, (
+                ticket_no, seat_no, svc_class, price,
+                purch_date, p_opts[p_label], f_opts[f_label],
+            ))
+            if ok:
+                st.session_state["tkt_clear"] = True
+                st.success(f"✅ Билет **{ticket_no}** успешно продан!")
+                st.rerun()
             else:
-                ok, err = run_cmd("""
-                    INSERT INTO ticket
-                        (ticket_no, seat_no, service_class, price,
-                         purchase_date, passenger_id, flight_id)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s);
-                """, (
-                    ticket_no, seat_no, svc_class, price,
-                    purch_date, p_opts[p_label], f_opts[f_label],
-                ))
-                if ok:
-                    st.success(f"✅ Билет **{ticket_no}** успешно продан!")
-                else:
-                    st.error(f"❌ Ошибка: {err}")
+                st.error(f"❌ Ошибка: {err}")
+
+    # ── Отмена (удаление) билета ──────────────────────────────────────
+    st.divider()
+    st.subheader("🗑️ Отменить билет")
+    sold = query_df("""
+        SELECT t.ticket_no, t.seat_no, t.price,
+               p.last_name, p.first_name, f.flight_number
+        FROM ticket t
+        JOIN passenger p ON p.passenger_id = t.passenger_id
+        JOIN flight    f ON f.flight_id    = t.flight_id
+        ORDER BY t.ticket_no;
+    """)
+    if sold.empty:
+        st.info("Проданных билетов пока нет.")
+        return
+    t_opts = {
+        f"№ {r['ticket_no']} · рейс {r['flight_number']} · место {r['seat_no']} · "
+        f"{r['last_name']} {r['first_name']} ({r['price']} руб.)": r["ticket_no"]
+        for _, r in sold.iterrows()
+    }
+    t_label = st.selectbox("Билет для отмены", list(t_opts.keys()))
+    if st.button("🗑️ Отменить билет", type="secondary"):
+        ok, err = run_cmd(
+            "DELETE FROM ticket WHERE ticket_no = %s;",
+            (t_opts[t_label],),
+        )
+        if ok:
+            st.success("✅ Билет отменён.")
+            st.rerun()
+        else:
+            st.error(f"❌ {err}")
 
 
 def _tab_update_passenger() -> None:
@@ -1260,32 +1355,70 @@ def _tab_update_passenger() -> None:
 
 def _tab_add_airline() -> None:
     st.subheader("✈️ Добавить авиакомпанию")
-    with st.form("form_add_airline"):
-        c1, c2  = st.columns(2)
-        iata    = c1.text_input("Код IATA (2 буквы) *").upper().strip()
-        name    = c2.text_input("Название авиакомпании *")
-        country = st.text_input("Страна регистрации *")
-        if st.form_submit_button("➕ Добавить", type="primary"):
-            if not all([iata, name, country]):
-                st.error("Заполните все обязательные поля (*)")
-            elif len(iata) != 2:
-                st.error("Код IATA должен состоять ровно из 2 символов.")
+
+    if "air_iata" not in st.session_state:
+        st.session_state["air_iata"] = ""
+
+    # Виджеты вне st.form — чтобы маска кода IATA срабатывала «вживую»
+    c1, c2  = st.columns(2)
+    c1.text_input(
+        "Код IATA (2 буквы) *",
+        key="air_iata",
+        placeholder="SU",
+        on_change=_fmt_iata,
+        args=("air_iata",),
+        help="Ровно 2 латинские буквы. Лишние символы убираются автоматически.",
+    )
+    name    = c2.text_input("Название авиакомпании *")
+    country = st.selectbox("Страна регистрации *", COUNTRIES)
+    if country == OTHER_COUNTRY:
+        country = st.text_input("Укажите страну *").strip()
+
+    if st.button("➕ Добавить", type="primary"):
+        iata = st.session_state["air_iata"]
+        if not all([iata, name, country]):
+            st.error("Заполните все обязательные поля (*)")
+        elif len(iata) != 2:
+            st.error("Код IATA должен состоять ровно из 2 букв.")
+        else:
+            ok, err = run_cmd(
+                "INSERT INTO airline (iata_code, name, country) VALUES (%s, %s, %s);",
+                (iata, name, country),
+            )
+            if ok:
+                st.success(f"✅ Авиакомпания **{name}** ({iata}) добавлена!")
             else:
-                ok, err = run_cmd(
-                    "INSERT INTO airline (iata_code, name, country) VALUES (%s, %s, %s);",
-                    (iata, name, country),
-                )
-                if ok:
-                    st.success(f"✅ Авиакомпания **{name}** ({iata}) добавлена!")
-                else:
-                    st.error(f"❌ {err}")
+                st.error(f"❌ {err}")
 
     st.divider()
     st.caption("Текущий список авиакомпаний:")
-    st.dataframe(
-        query_df("SELECT * FROM airline ORDER BY name;"),
-        width="stretch",
-    )
+    airlines = query_df("SELECT * FROM airline ORDER BY name;")
+    st.dataframe(airlines, width="stretch")
+
+    # ── Удаление авиакомпании ─────────────────────────────────────────
+    st.subheader("🗑️ Удалить авиакомпанию")
+    if airlines.empty:
+        st.info("Авиакомпаний пока нет.")
+        return
+    al_opts = {
+        f"{r['name']} ({r['iata_code']})": r["iata_code"]
+        for _, r in airlines.iterrows()
+    }
+    al_label = st.selectbox("Авиакомпания для удаления", list(al_opts.keys()))
+    if st.button("🗑️ Удалить авиакомпанию", type="secondary"):
+        ok, err = run_cmd(
+            "DELETE FROM airline WHERE iata_code = %s;",
+            (al_opts[al_label],),
+        )
+        if ok:
+            st.success("✅ Авиакомпания удалена.")
+            st.rerun()
+        else:
+            st.error(
+                "❌ Не удалось удалить: к авиакомпании привязаны самолёты. "
+                "Сначала удалите или перепривяжите её самолёты.\n\n"
+                f"Детали: {err}"
+            )
 
 
 def _tab_add_aircraft() -> None:
@@ -1326,8 +1459,92 @@ def _tab_add_aircraft() -> None:
 
     st.divider()
     st.caption("Текущий парк воздушных судов:")
+    aircrafts = query_df("SELECT * FROM aircraft ORDER BY tail_number;")
+    st.dataframe(aircrafts, width="stretch")
+
+    # ── Удаление самолёта ─────────────────────────────────────────────
+    st.subheader("🗑️ Удалить самолёт")
+    if aircrafts.empty:
+        st.info("Самолётов пока нет.")
+        return
+    ac_del_opts = {
+        f"{r['tail_number']} ({r['model']})": r["tail_number"]
+        for _, r in aircrafts.iterrows()
+    }
+    ac_del_label = st.selectbox("Самолёт для удаления", list(ac_del_opts.keys()))
+    if st.button("🗑️ Удалить самолёт", type="secondary"):
+        ok, err = run_cmd(
+            "DELETE FROM aircraft WHERE tail_number = %s;",
+            (ac_del_opts[ac_del_label],),
+        )
+        if ok:
+            st.success("✅ Самолёт удалён.")
+            st.rerun()
+        else:
+            st.error(
+                "❌ Не удалось удалить: на самолёт назначены рейсы. "
+                "Сначала удалите или перепривяжите связанные рейсы.\n\n"
+                f"Детали: {err}"
+            )
+
+
+# Допустимые должности сотрудника (строго по chk_position в схеме)
+EMPLOYEE_POSITIONS = ["пилот", "второй пилот", "бортпроводник"]
+
+
+def _tab_add_employee() -> None:
+    st.subheader("👨‍✈️ Зарегистрировать нового сотрудника")
+    st.caption(
+        "Регистрация члена экипажа. Табельный номер — 6-значное число (100000–999999), "
+        "должность — из утверждённого списка."
+    )
+    with st.form("form_add_employee"):
+        c1, c2      = st.columns(2)
+        employee_id = c1.number_input(
+            "Табельный номер *",
+            min_value=100000, max_value=999999, value=100000, step=1,
+            help="6-значный табельный номер (100000–999999).",
+        )
+        position    = c2.selectbox("Должность *", EMPLOYEE_POSITIONS)
+        last_name   = c1.text_input("Фамилия *")
+        first_name  = c2.text_input("Имя *")
+        middle_name = c1.text_input("Отчество (необязательно)")
+        hire_date   = c2.date_input(
+            "Дата приёма *",
+            value=date.today(),
+            min_value=date(1950, 1, 1),
+            max_value=date.today(),
+        )
+        if st.form_submit_button("➕ Добавить сотрудника", type="primary"):
+            if not all([last_name, first_name]):
+                st.error("Заполните Фамилию и Имя.")
+            else:
+                ok, err = run_cmd("""
+                    INSERT INTO employee
+                        (employee_id, last_name, first_name, middle_name,
+                         position, hire_date)
+                    VALUES (%s, %s, %s, %s, %s, %s);
+                """, (
+                    int(employee_id), last_name, first_name,
+                    middle_name if middle_name else None,
+                    position, hire_date,
+                ))
+                if ok:
+                    st.success(
+                        f"✅ Сотрудник **{last_name} {first_name}** "
+                        f"(таб. № {int(employee_id)}) добавлен!"
+                    )
+                else:
+                    st.error(
+                        "❌ Не удалось добавить сотрудника. "
+                        "Возможно, табельный номер уже занят.\n\n"
+                        f"Детали: {err}"
+                    )
+
+    st.divider()
+    st.caption("Текущий список сотрудников:")
     st.dataframe(
-        query_df("SELECT * FROM aircraft ORDER BY tail_number;"),
+        query_df("SELECT * FROM employee ORDER BY last_name;"),
         width="stretch",
     )
 
