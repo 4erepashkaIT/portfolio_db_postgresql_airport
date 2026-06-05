@@ -9,6 +9,7 @@ from datetime import date, datetime, time as dtime
 
 import pandas as pd
 import psycopg2
+import psycopg2.pool
 import streamlit as st
 import re
 
@@ -142,27 +143,50 @@ COUNTRIES = [
 #  ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ БД
 # ══════════════════════════════════════════════════════════════════════
 
-def _open_conn() -> psycopg2.extensions.connection:
-    """Открыть соединение с БД от имени текущего пользователя."""
+@st.cache_resource(show_spinner=False)
+def _get_pool(user: str, password: str) -> psycopg2.pool.ThreadedConnectionPool:
+    """Пул соединений на каждого пользователя БД.
+
+    `st.cache_resource` хранит пул между перезапусками скрипта, поэтому новое
+    TCP-соединение не открывается на каждый запрос. Пул потокобезопасный.
+    """
+    return psycopg2.pool.ThreadedConnectionPool(
+        minconn=1, maxconn=5, **DB_CFG, user=user, password=password
+    )
+
+
+def _borrow_conn():
+    """Взять соединение из пула текущего пользователя."""
     c = st.session_state["creds"]
-    return psycopg2.connect(**DB_CFG, user=c["user"], password=c["password"])
+    return _get_pool(c["user"], c["password"])
 
 
 def query_df(sql: str, params=None) -> pd.DataFrame:
-    """Выполнить SELECT и вернуть DataFrame. Ошибки выводятся через st.error."""
-    conn = None
+    """Выполнить SELECT и вернуть DataFrame.
+
+    При ошибке выводит её через st.error и возвращает пустой DataFrame с
+    пометкой `attrs["query_error"]`, чтобы show_result не дублировал сообщение.
+    """
+    pool = _borrow_conn()
+    conn = pool.getconn()
     try:
-        conn = _open_conn()
         with conn.cursor() as cur:
             cur.execute(sql, params)
             cols = [d[0] for d in (cur.description or [])]
-            return pd.DataFrame(cur.fetchall(), columns=cols)
+            df = pd.DataFrame(cur.fetchall(), columns=cols)
+        conn.commit()
+        return df
     except Exception as exc:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
         st.error(f"Ошибка выполнения запроса: {exc}")
-        return pd.DataFrame()
+        df = pd.DataFrame()
+        df.attrs["query_error"] = True
+        return df
     finally:
-        if conn:
-            conn.close()
+        pool.putconn(conn, close=bool(conn.closed))
 
 
 def run_cmd(sql: str, params=None, return_rowcount: bool = False) -> tuple:
@@ -171,22 +195,34 @@ def run_cmd(sql: str, params=None, return_rowcount: bool = False) -> tuple:
     Возвращает (успех: bool, ошибка: str|None) либо, при return_rowcount=True,
     (успех: bool, ошибка: str|None, затронуто_строк: int).
     """
-    conn = None
+    pool = _borrow_conn()
+    conn = pool.getconn()
     rowcount = 0
     try:
-        conn = _open_conn()
         with conn.cursor() as cur:
             cur.execute(sql, params)
             rowcount = cur.rowcount
         conn.commit()
         return (True, None, rowcount) if return_rowcount else (True, None)
     except Exception as exc:
-        if conn:
+        try:
             conn.rollback()
+        except Exception:
+            pass
         return (False, str(exc), 0) if return_rowcount else (False, str(exc))
     finally:
-        if conn:
-            conn.close()
+        pool.putconn(conn, close=bool(conn.closed))
+
+
+def _safe_table(tbl: str) -> str:
+    """Защита от SQL-инъекции при подстановке имени таблицы в запрос.
+
+    Имя таблицы нельзя передать параметром (%s), поэтому проверяем его по
+    белому списку известных таблиц перед интерполяцией в f-строку.
+    """
+    if tbl not in TABLE_LABELS:
+        raise ValueError(f"Недопустимое имя таблицы: {tbl!r}")
+    return tbl
 
 
 # ── Проверка ролей ────────────────────────────────────────────────────
@@ -205,6 +241,8 @@ def is_cashier() -> bool:
 
 # ── Вывод результата запроса ──────────────────────────────────────────
 def show_result(df: pd.DataFrame) -> None:
+    if df.attrs.get("query_error"):
+        return  # ошибку уже показал query_df — не дублируем «Данные не найдены»
     if df.empty:
         st.info("Данные не найдены.")
     else:
@@ -312,7 +350,7 @@ def page_home() -> None:
     table_defs = ROLE_TABLES.get(role(), [])
     cols = st.columns(len(table_defs))
     for col, (icon, lbl, tbl) in zip(cols, table_defs):
-        res = query_df(f"SELECT COUNT(*) AS cnt FROM {tbl};")
+        res = query_df(f"SELECT COUNT(*) AS cnt FROM {_safe_table(tbl)};")
         cnt = int(res.iloc[0]["cnt"]) if not res.empty else "—"
         col.metric(f"{icon} {lbl}", cnt)
 
@@ -335,6 +373,7 @@ def page_home() -> None:
             "✅ Просмотр рейсов, пассажиров, билетов (SELECT)",
             "✅ Добавление новых пассажиров (INSERT на passenger)",
             "✅ Продажа билетов (INSERT на ticket)",
+            "✅ Отмена (удаление) билетов (DELETE на ticket)",
             "✅ Изменение телефона и номера паспорта пассажира (UPDATE phone, passport_no)",
             "❌ Запрещено изменять рейсы, самолёты, сотрудников и авиакомпании",
         ],
@@ -374,10 +413,10 @@ def page_tables() -> None:
     limit  = c2.selectbox("Строк", [10, 25, 50, 100], index=1)
     offset = c3.number_input("Смещение", min_value=0, step=10, value=0)
 
-    total_df = query_df(f"SELECT COUNT(*) AS cnt FROM {tbl};")
+    total_df = query_df(f"SELECT COUNT(*) AS cnt FROM {_safe_table(tbl)};")
     total    = int(total_df.iloc[0]["cnt"]) if not total_df.empty else 0
     data     = query_df(
-        f"SELECT * FROM {tbl} ORDER BY 1 LIMIT %s OFFSET %s;",
+        f"SELECT * FROM {_safe_table(tbl)} ORDER BY 1 LIMIT %s OFFSET %s;",
         (limit, offset),
     )
 
@@ -446,7 +485,7 @@ def _render_query(idx: int) -> None:  # noqa: C901
             "Фильтрация по дате через `DATE(depart_at)`. "
             "Результат отсортирован по времени вылета."
         )
-        d = st.date_input("Дата", value=date(2024, 6, 15))
+        d = st.date_input("Дата", value=date(2024, 12, 1))
         if st.button("▶ Выполнить", key="q2"):
             show_result(query_df("""
                 SELECT f.flight_number AS номер_рейса,
@@ -569,7 +608,7 @@ def _render_query(idx: int) -> None:  # noqa: C901
         )
         c1, c2 = st.columns(2)
         d1 = c1.date_input("С",  value=date(2024, 6, 1),   key="q6d1")
-        d2 = c2.date_input("По", value=date(2024, 12, 31), key="q6d2")
+        d2 = c2.date_input("По", value=date.today(), key="q6d2")
         if st.button("▶ Выполнить", key="q6"):
             show_result(query_df("""
                 SELECT f.flight_number AS номер_рейса,
@@ -600,7 +639,7 @@ def _render_query(idx: int) -> None:  # noqa: C901
         ac_label = st.selectbox("Самолёт", list(ac_opts.keys()))
         c1, c2 = st.columns(2)
         d1 = c1.date_input("С",  value=date(2024, 1, 1),   key="q7d1")
-        d2 = c2.date_input("По", value=date(2024, 12, 31), key="q7d2")
+        d2 = c2.date_input("По", value=date.today(), key="q7d2")
         if st.button("▶ Выполнить", key="q7"):
             show_result(query_df("""
                 SELECT f.flight_number AS номер_рейса,
@@ -783,12 +822,12 @@ def _report_employees() -> None:
     )
     c1, c2 = st.columns(2)
     d1 = c1.date_input("С",  value=date(2024, 1, 1),   key="rep2d1")
-    d2 = c2.date_input("По", value=date(2024, 12, 31), key="rep2d2")
+    d2 = c2.date_input("По", value=date.today(), key="rep2d2")
     if st.button("Сформировать", key="rep2"):
         res = query_df("""
             SELECT e.employee_id                                          AS табельный_номер,
-                   e.last_name || ' ' || e.first_name || ' ' ||
-                       COALESCE(e.middle_name, '')                        AS фио,
+                   TRIM(e.last_name || ' ' || e.first_name || ' ' ||
+                        COALESCE(e.middle_name, ''))                      AS фио,
                    e.position                                             AS должность,
                    EXTRACT(YEAR FROM AGE(CURRENT_DATE, e.hire_date))::INT AS стаж_лет,
                    COUNT(f.flight_id)                                     AS рейсов_в_периоде
@@ -1338,15 +1377,26 @@ def _tab_update_passenger() -> None:
         new_phone    = st.text_input("Телефон",        value=str(pdata["phone"]))
         new_passport = st.text_input("Номер паспорта", value=str(pdata["passport_no"]))
         if st.form_submit_button("💾 Сохранить изменения", type="primary"):
-            ok, err = run_cmd("""
-                UPDATE passenger
-                   SET phone = %s, passport_no = %s
-                 WHERE passenger_id = %s;
-            """, (new_phone, new_passport, int(pdata["passenger_id"])))
-            if ok:
-                st.success("✅ Данные пассажира обновлены!")
+            # Та же валидация, что и при добавлении пассажира
+            errors = []
+            if len(re.sub(r"\D", "", new_passport)) != 10:
+                errors.append("Номер паспорта должен содержать 10 цифр (XX XX XXXXXX).")
+            if len(re.sub(r"\D", "", new_phone)) != 11:
+                errors.append("Телефон должен содержать 11 цифр (+7 и 10 цифр номера).")
+
+            if errors:
+                for e in errors:
+                    st.error(e)
             else:
-                st.error(f"❌ {err}")
+                ok, err = run_cmd("""
+                    UPDATE passenger
+                       SET phone = %s, passport_no = %s
+                     WHERE passenger_id = %s;
+                """, (new_phone, new_passport, int(pdata["passenger_id"])))
+                if ok:
+                    st.success("✅ Данные пассажира обновлены!")
+                else:
+                    st.error(f"❌ {err}")
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -1574,7 +1624,7 @@ def page_security() -> None:
         "SELECT":        ["Все таблицы",     "Все таблицы",                           "flight, passenger, ticket, aircraft"],
         "INSERT":        ["Все таблицы",     "flight, crew_assignment",               "passenger, ticket"],
         "UPDATE":        ["Все таблицы",     "flight, aircraft, crew_assignment",     "passenger (phone, passport_no)"],
-        "DELETE":        ["Все таблицы",     "crew_assignment",                       "—"],
+        "DELETE":        ["Все таблицы",     "crew_assignment",                       "ticket"],
         "Особые права":  ["CREATEDB CREATEROLE", "—",                                "—"],
     })
     st.dataframe(perms, width="stretch", hide_index=True)
@@ -1607,8 +1657,11 @@ GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO dispatcher_user;
 
 -- ── Кассир ─────────────────────────────────────────────
 CREATE USER cashier_user WITH PASSWORD 'cashier_pass_2024';
-GRANT SELECT ON flight, passenger, ticket TO cashier_user;
+-- Чтение: рейсы, пассажиры, билеты + самолёты (для JOIN-ов в запросах и отчётах)
+GRANT SELECT ON flight, passenger, ticket, aircraft TO cashier_user;
 GRANT INSERT ON passenger, ticket         TO cashier_user;
+-- Отмена билетов
+GRANT DELETE ON ticket                    TO cashier_user;
 -- Только телефон и паспорт пассажира
 GRANT UPDATE (phone, passport_no) ON passenger TO cashier_user;
 GRANT USAGE, SELECT ON SEQUENCE

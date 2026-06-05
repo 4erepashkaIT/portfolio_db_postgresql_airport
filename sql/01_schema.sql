@@ -20,8 +20,11 @@ CREATE TABLE IF NOT EXISTS aircraft (
                                     ON DELETE RESTRICT,
 
     CONSTRAINT chk_capacity    CHECK (capacity > 0),
-    CONSTRAINT chk_year_built  CHECK (year_built BETWEEN 1950
-                                      AND EXTRACT(YEAR FROM CURRENT_DATE))
+    -- Статичная граница: CHECK не должен зависеть от неизменяемых функций
+    -- (CURRENT_DATE) — это ломает dump/restore и молча «плывёт» каждый год.
+    -- Верхняя граница 2100 — санитарный предел; «не из будущего» проверяет
+    -- приложение (year max_value = date.today().year).
+    CONSTRAINT chk_year_built  CHECK (year_built BETWEEN 1950 AND 2100)
 );
 
 -- ------------------------------------------------------------
@@ -116,11 +119,15 @@ DECLARE
     v_capacity   INTEGER;
     v_sold       INTEGER;
 BEGIN
-    -- Вместимость самолёта для данного рейса
+    -- Вместимость самолёта для данного рейса.
+    -- FOR UPDATE OF f блокирует строку рейса: одновременные вставки билетов
+    -- на один рейс сериализуются, иначе две параллельные транзакции могли бы
+    -- обе пройти проверку и привести к перепродаже сверх вместимости.
     SELECT a.capacity INTO v_capacity
     FROM flight f
     JOIN aircraft a ON a.tail_number = f.tail_number
-    WHERE f.flight_id = NEW.flight_id;
+    WHERE f.flight_id = NEW.flight_id
+    FOR UPDATE OF f;
 
     -- Количество уже проданных билетов
     SELECT COUNT(*) INTO v_sold
