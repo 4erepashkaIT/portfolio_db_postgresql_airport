@@ -485,7 +485,7 @@ def _render_query(idx: int) -> None:  # noqa: C901
             "Фильтрация по дате через `DATE(depart_at)`. "
             "Результат отсортирован по времени вылета."
         )
-        d = st.date_input("Дата", value=date(2024, 12, 1))
+        d = st.date_input("Дата", value=date(2026, 7, 3))
         if st.button("▶ Выполнить", key="q2"):
             show_result(query_df("""
                 SELECT f.flight_number AS номер_рейса,
@@ -607,7 +607,7 @@ def _render_query(idx: int) -> None:  # noqa: C901
             "Фильтр `IN ('задержан', 'отменён')` и `BETWEEN` по диапазону дат."
         )
         c1, c2 = st.columns(2)
-        d1 = c1.date_input("С",  value=date(2024, 6, 1),   key="q6d1")
+        d1 = c1.date_input("С",  value=date(2026, 5, 1),   key="q6d1")
         d2 = c2.date_input("По", value=date.today(), key="q6d2")
         if st.button("▶ Выполнить", key="q6"):
             show_result(query_df("""
@@ -638,7 +638,7 @@ def _render_query(idx: int) -> None:  # noqa: C901
         }
         ac_label = st.selectbox("Самолёт", list(ac_opts.keys()))
         c1, c2 = st.columns(2)
-        d1 = c1.date_input("С",  value=date(2024, 1, 1),   key="q7d1")
+        d1 = c1.date_input("С",  value=date(2026, 1, 1),   key="q7d1")
         d2 = c2.date_input("По", value=date.today(), key="q7d2")
         if st.button("▶ Выполнить", key="q7"):
             show_result(query_df("""
@@ -821,7 +821,7 @@ def _report_employees() -> None:
         "`LEFT JOIN` — чтобы отображать и сотрудников без назначений."
     )
     c1, c2 = st.columns(2)
-    d1 = c1.date_input("С",  value=date(2024, 1, 1),   key="rep2d1")
+    d1 = c1.date_input("С",  value=date(2026, 1, 1),   key="rep2d1")
     d2 = c2.date_input("По", value=date.today(), key="rep2d2")
     if st.button("Сформировать", key="rep2"):
         res = query_df("""
