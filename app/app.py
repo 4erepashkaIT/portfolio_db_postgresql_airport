@@ -893,6 +893,63 @@ def page_reports() -> None:
 
 
 # ══════════════════════════════════════════════════════════════════════
+#  МЕСТОНАХОЖДЕНИЕ САМОЛЁТА
+# ══════════════════════════════════════════════════════════════════════
+
+def _aircraft_location(tail_number: str) -> str:
+    """Возвращает текущее местонахождение самолёта на основе последнего рейса.
+
+    Логика:
+    - Если есть активный рейс (вылетел, но ещё не прилетел) — «в воздухе (откуда → куда)»
+    - Иначе — city_to последнего завершённого/запланированного рейса
+    - Если рейсов нет — «неизвестно»
+    """
+    # Проверяем, не в воздухе ли самолёт прямо сейчас
+    airborne = query_df("""
+        SELECT city_from, city_to
+        FROM flight
+        WHERE tail_number = %s
+          AND status NOT IN ('отменён')
+          AND depart_at <= NOW()
+          AND arrive_at  > NOW()
+        ORDER BY depart_at DESC
+        LIMIT 1;
+    """, (tail_number,))
+    if not airborne.empty:
+        r = airborne.iloc[0]
+        return f"✈️ в воздухе ({r['city_from']} → {r['city_to']})"
+
+    # Последний завершённый или прилетевший рейс
+    last = query_df("""
+        SELECT city_to, arrive_at, status
+        FROM flight
+        WHERE tail_number = %s
+          AND status NOT IN ('отменён')
+          AND arrive_at <= NOW()
+        ORDER BY arrive_at DESC
+        LIMIT 1;
+    """, (tail_number,))
+    if not last.empty:
+        return f"🏁 {last.iloc[0]['city_to']}"
+
+    # Ближайший предстоящий рейс (ещё не вылетел)
+    upcoming = query_df("""
+        SELECT city_from, depart_at
+        FROM flight
+        WHERE tail_number = %s
+          AND status NOT IN ('отменён')
+          AND depart_at > NOW()
+        ORDER BY depart_at ASC
+        LIMIT 1;
+    """, (tail_number,))
+    if not upcoming.empty:
+        r = upcoming.iloc[0]
+        return f"🕐 ожидает вылета из {r['city_from']}"
+
+    return "❓ неизвестно (рейсов нет)"
+
+
+# ══════════════════════════════════════════════════════════════════════
 #  СТРАНИЦА: УПРАВЛЕНИЕ ДАННЫМИ
 # ══════════════════════════════════════════════════════════════════════
 
@@ -945,10 +1002,19 @@ def _tab_add_flight() -> None:
         f"{r['tail_number']} ({r['model']})": r["tail_number"]
         for _, r in aircrafts.iterrows()
     }
+
+    # Выбор самолёта вне формы — чтобы можно было показывать местонахождение динамически
+    c0a, c0b = st.columns(2)
+    ac_label_pre = c0a.selectbox("Самолёт *", list(ac_opts.keys()), key="add_flight_ac")
+    loc = _aircraft_location(ac_opts[ac_label_pre])
+    c0b.markdown(f"**Текущее местонахождение:**  \n{loc}")
+    st.divider()
+
     with st.form("form_add_flight"):
         c1, c2    = st.columns(2)
         flight_no = c1.text_input("Номер рейса *", placeholder="SU1234")
-        ac_label  = c2.selectbox("Самолёт *", list(ac_opts.keys()))
+        ac_label  = c2.selectbox("Самолёт *", list(ac_opts.keys()),
+                                 index=list(ac_opts.keys()).index(ac_label_pre))
         city_from = c1.text_input("Город отправления *")
         city_to   = c2.text_input("Город назначения *")
         dep_date  = c1.date_input("Дата вылета *", value=date.today())
@@ -969,17 +1035,34 @@ def _tab_add_flight() -> None:
                 elif arrive_at <= depart_at:
                     st.error("Время прилёта должно быть позже времени вылета.")
                 else:
-                    ok, err = run_cmd("""
-                        INSERT INTO flight
-                            (flight_number, city_from, city_to,
-                             depart_at, arrive_at, tail_number)
-                        VALUES (%s, %s, %s, %s, %s, %s);
-                    """, (flight_no, city_from, city_to,
-                          depart_at, arrive_at, ac_opts[ac_label]))
-                    if ok:
-                        st.success(f"✅ Рейс **{flight_no}** успешно добавлен!")
+                    # Проверка: самолёт уже назначен на рейс в этот день?
+                    conflict = query_df("""
+                        SELECT flight_number, city_from, city_to, depart_at
+                        FROM flight
+                        WHERE tail_number = %s
+                          AND DATE(depart_at) = %s
+                          AND status <> 'отменён'
+                    """, (ac_opts[ac_label], dep_date))
+                    if not conflict.empty:
+                        r = conflict.iloc[0]
+                        st.error(
+                            f"❌ Самолёт **{ac_opts[ac_label]}** уже назначен на рейс "
+                            f"**{r['flight_number']}** ({r['city_from']} → {r['city_to']}, "
+                            f"вылет {r['depart_at'].strftime('%H:%M')}) в этот день. "
+                            f"Выберите другой самолёт или другую дату."
+                        )
                     else:
-                        st.error(f"❌ Ошибка: {err}")
+                        ok, err = run_cmd("""
+                            INSERT INTO flight
+                                (flight_number, city_from, city_to,
+                                 depart_at, arrive_at, tail_number)
+                            VALUES (%s, %s, %s, %s, %s, %s);
+                        """, (flight_no, city_from, city_to,
+                              depart_at, arrive_at, ac_opts[ac_label]))
+                        if ok:
+                            st.success(f"✅ Рейс **{flight_no}** успешно добавлен!")
+                        else:
+                            st.error(f"❌ Ошибка: {err}")
 
 
 def _tab_update_flight_status() -> None:
@@ -1510,6 +1593,8 @@ def _tab_add_aircraft() -> None:
     st.divider()
     st.caption("Текущий парк воздушных судов:")
     aircrafts = query_df("SELECT * FROM aircraft ORDER BY tail_number;")
+    if not aircrafts.empty:
+        aircrafts["местонахождение"] = aircrafts["tail_number"].apply(_aircraft_location)
     st.dataframe(aircrafts, width="stretch")
 
     # ── Удаление самолёта ─────────────────────────────────────────────
