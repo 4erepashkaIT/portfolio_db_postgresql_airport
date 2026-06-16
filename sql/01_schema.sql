@@ -1,17 +1,17 @@
 -- ------------------------------------------------------------
--- 1. АВИАКОМПАНИЯ
+-- 1. AIRLINE
 -- ------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS airline (
-    iata_code   CHAR(2)         PRIMARY KEY,                         -- 'SU', 'S7', 'U6'
+    iata_code   CHAR(2)         PRIMARY KEY,                         -- 'NZ', 'QF', 'SQ'
     name        VARCHAR(100)    NOT NULL,
     country     VARCHAR(60)     NOT NULL
 );
 
 -- ------------------------------------------------------------
--- 2. САМОЛЁТ
+-- 2. AIRCRAFT
 -- ------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS aircraft (
-    tail_number VARCHAR(10)     PRIMARY KEY,                         -- 'VP-BWA'
+    tail_number VARCHAR(10)     PRIMARY KEY,                         -- 'ZK-NZE'
     model       VARCHAR(50)     NOT NULL,
     capacity    SMALLINT        NOT NULL,
     year_built  SMALLINT        NOT NULL,
@@ -20,49 +20,52 @@ CREATE TABLE IF NOT EXISTS aircraft (
                                     ON DELETE RESTRICT,
 
     CONSTRAINT chk_capacity    CHECK (capacity > 0),
-    -- Статичная граница: CHECK не должен зависеть от неизменяемых функций
-    -- (CURRENT_DATE) — это ломает dump/restore и молча «плывёт» каждый год.
-    -- Верхняя граница 2100 — санитарный предел; «не из будущего» проверяет
-    -- приложение (year max_value = date.today().year).
+    -- Static bound: a CHECK must not depend on non-immutable functions
+    -- (CURRENT_DATE) — that breaks dump/restore and silently drifts each year.
+    -- The 2100 upper bound is a sanity limit; "not from the future" is enforced
+    -- by the application (year max_value = date.today().year).
     CONSTRAINT chk_year_built  CHECK (year_built BETWEEN 1950 AND 2100)
 );
 
 -- ------------------------------------------------------------
--- 3. РЕЙС
+-- 3. FLIGHT
 -- ------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS flight (
     flight_id       SERIAL          PRIMARY KEY,
-    flight_number   VARCHAR(10)     NOT NULL,                        -- 'SU1234'
+    flight_number   VARCHAR(10)     NOT NULL,                        -- 'NZ0101'
     city_from       VARCHAR(80)     NOT NULL,
     city_to         VARCHAR(80)     NOT NULL,
     depart_at       TIMESTAMP       NOT NULL,
     arrive_at       TIMESTAMP       NOT NULL,
-    status          VARCHAR(15)     NOT NULL DEFAULT 'по расписанию',
+    status          VARCHAR(15)     NOT NULL DEFAULT 'scheduled',
     tail_number     VARCHAR(10)     NOT NULL REFERENCES aircraft(tail_number)
                                         ON UPDATE CASCADE
                                         ON DELETE RESTRICT,
 
     CONSTRAINT chk_flight_time   CHECK (arrive_at > depart_at),
     CONSTRAINT chk_flight_status CHECK (status IN (
-                                    'по расписанию', 'задержан',
-                                    'отменён',        'выполнен'))
+                                    'scheduled', 'delayed',
+                                    'cancelled', 'completed')),
+    -- Single-hub airport: every flight must depart from or arrive at Auckland.
+    CONSTRAINT chk_airport_hub   CHECK (city_from = 'Auckland'
+                                     OR city_to   = 'Auckland')
 );
 
 -- ------------------------------------------------------------
--- 4. ПАССАЖИР
+-- 4. PASSENGER
 -- ------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS passenger (
     passenger_id    SERIAL          PRIMARY KEY,
     last_name       VARCHAR(50)     NOT NULL,
     first_name      VARCHAR(50)     NOT NULL,
-    middle_name     VARCHAR(50),                                     -- отчество необязательно
+    middle_name     VARCHAR(50),                                     -- middle name is optional
     passport_no     VARCHAR(20)     NOT NULL UNIQUE,
     birth_date      DATE            NOT NULL,
     phone           VARCHAR(20)     NOT NULL
 );
 
 -- ------------------------------------------------------------
--- 5. БИЛЕТ
+-- 5. TICKET
 -- ------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS ticket (
     ticket_no       VARCHAR(20)     PRIMARY KEY,                     -- '2982401838278'
@@ -78,15 +81,15 @@ CREATE TABLE IF NOT EXISTS ticket (
                                         ON DELETE RESTRICT,
 
     CONSTRAINT chk_ticket_price  CHECK (price > 0),
-    CONSTRAINT chk_service_class CHECK (service_class IN ('эконом', 'бизнес', 'первый')),
-    CONSTRAINT uq_seat_flight    UNIQUE (flight_id, seat_no)         -- одно место — один пассажир
+    CONSTRAINT chk_service_class CHECK (service_class IN ('economy', 'business', 'first')),
+    CONSTRAINT uq_seat_flight    UNIQUE (flight_id, seat_no)         -- one seat — one passenger
 );
 
 -- ------------------------------------------------------------
--- 6. СОТРУДНИК
+-- 6. EMPLOYEE
 -- ------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS employee (
-    employee_id     INTEGER         PRIMARY KEY,                     -- 6-значный табельный №
+    employee_id     INTEGER         PRIMARY KEY,                     -- 6-digit staff number
     last_name       VARCHAR(50)     NOT NULL,
     first_name      VARCHAR(50)     NOT NULL,
     middle_name     VARCHAR(50),
@@ -95,11 +98,11 @@ CREATE TABLE IF NOT EXISTS employee (
 
     CONSTRAINT chk_employee_id  CHECK (employee_id BETWEEN 100000 AND 999999),
     CONSTRAINT chk_position     CHECK (position IN (
-                                    'пилот', 'второй пилот', 'бортпроводник'))
+                                    'pilot', 'co-pilot', 'flight attendant'))
 );
 
 -- ------------------------------------------------------------
--- 7. НАЗНАЧЕНИЕ НА РЕЙС (связующая таблица M:M)
+-- 7. CREW ASSIGNMENT (M:N junction table)
 -- ------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS crew_assignment (
     flight_id       INTEGER     NOT NULL REFERENCES flight(flight_id)
@@ -119,24 +122,23 @@ DECLARE
     v_capacity   INTEGER;
     v_sold       INTEGER;
 BEGIN
-    -- Вместимость самолёта для данного рейса.
-    -- FOR UPDATE OF f блокирует строку рейса: одновременные вставки билетов
-    -- на один рейс сериализуются, иначе две параллельные транзакции могли бы
-    -- обе пройти проверку и привести к перепродаже сверх вместимости.
+    -- Aircraft capacity for this flight.
+    -- FOR UPDATE OF f locks the flight row: concurrent ticket inserts for the
+    -- same flight are serialized, otherwise two parallel transactions could
+    -- both pass the check and oversell beyond capacity.
     SELECT a.capacity INTO v_capacity
     FROM flight f
     JOIN aircraft a ON a.tail_number = f.tail_number
     WHERE f.flight_id = NEW.flight_id
     FOR UPDATE OF f;
 
-    -- Количество уже проданных билетов
     SELECT COUNT(*) INTO v_sold
     FROM ticket
     WHERE flight_id = NEW.flight_id;
 
     IF v_sold >= v_capacity THEN
         RAISE EXCEPTION
-            'Нет свободных мест на рейс % (вместимость: %, продано: %)',
+            'No seats available on flight % (capacity: %, sold: %)',
             NEW.flight_id, v_capacity, v_sold;
     END IF;
 
