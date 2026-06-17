@@ -9,9 +9,7 @@ import psycopg2.pool
 import streamlit as st
 import re
 
-# ══════════════════════════════════════════════════════════════════════
-#  APP CONFIGURATION
-# ══════════════════════════════════════════════════════════════════════
+#APP CONFIGURATION
 
 st.set_page_config(
     page_title="Auckland Airport DB",
@@ -48,7 +46,7 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-# ── User credentials ──────────────────────────────────────────────────
+#User credentials
 USERS: dict = {
     "Administrator": {
         "db_user":  "admin_user",
@@ -67,14 +65,14 @@ USERS: dict = {
     },
 }
 
-# ── PostgreSQL connection parameters ──────────────────────────────────
+#PostgreSQL connection parameters
 DB_CFG: dict = {
     "host":     os.getenv("DB_HOST",     "localhost"),
     "port":     int(os.getenv("DB_PORT", "5432")),
     "database": os.getenv("POSTGRES_DB", "airport_db"),
 }
 
-# ── Table labels ──────────────────────────────────────────────────────
+#Table labels
 TABLE_LABELS: dict = {
     "airline":          "Airlines",
     "aircraft":         "Aircraft",
@@ -91,7 +89,7 @@ ROLE_ALLOWED_TABLES = {
     "Cashier":       ["flight", "passenger", "ticket"],
 }
 
-# ── Query list ────────────────────────────────────────────────────────
+#Query list
 QUERY_LIST = [
     "1.  Passengers on a flight",
     "2.  Flight schedule for a date",
@@ -114,7 +112,7 @@ ROLE_ALLOWED_QUERIES = {
     "Cashier":       [1, 2, 4, 6, 7, 8, 9, 10, 11, 12],
 }
 
-# ── Standard crew roles ───────────────────────────────────────────────
+#Standard crew roles
 CREW_ROLES = [
     "captain",
     "first officer",
@@ -124,7 +122,7 @@ CREW_ROLES = [
     "flight attendant",
 ]
 
-# ── Airline registration countries ────────────────────────────────────
+#Airline registration countries
 OTHER_COUNTRY = "Other…"
 COUNTRIES = [
     "New Zealand", "Australia", "Singapore", "United Arab Emirates",
@@ -132,10 +130,7 @@ COUNTRIES = [
     "China", "Japan", OTHER_COUNTRY,
 ]
 
-
-# ══════════════════════════════════════════════════════════════════════
-#  DATABASE HELPERS
-# ══════════════════════════════════════════════════════════════════════
+#DATABASE HELPERS
 
 @st.cache_resource(show_spinner=False)
 def _get_pool(user: str, password: str) -> psycopg2.pool.ThreadedConnectionPool:
@@ -219,7 +214,7 @@ def _safe_table(tbl: str) -> str:
     return tbl
 
 
-# ── Role checks ───────────────────────────────────────────────────────
+#Role checks
 def role() -> str:
     return st.session_state.get("role", "")
 
@@ -233,7 +228,7 @@ def is_cashier() -> bool:
     return role() in ("Administrator", "Cashier")
 
 
-# ── Query result output ───────────────────────────────────────────────
+#Query result output
 def show_result(df: pd.DataFrame) -> None:
     if df.attrs.get("query_error"):
         return  # query_df already showed the error — do not add "No data found"
@@ -242,11 +237,6 @@ def show_result(df: pd.DataFrame) -> None:
     else:
         st.caption(f"Rows found: **{len(df)}**")
         st.dataframe(df, width="stretch")
-
-
-# ══════════════════════════════════════════════════════════════════════
-#  PAGE: LOGIN
-# ══════════════════════════════════════════════════════════════════════
 
 def page_login() -> None:
     _, col, _ = st.columns([1, 1.2, 1])
@@ -272,11 +262,6 @@ def page_login() -> None:
             for r, u in USERS.items():
                 st.caption(f"**{r}:** `{u['password']}`")
 
-
-# ══════════════════════════════════════════════════════════════════════
-#  SIDEBAR
-# ══════════════════════════════════════════════════════════════════════
-
 def sidebar_nav() -> str:
     r = role()
     u = USERS[r]
@@ -299,11 +284,6 @@ def sidebar_nav() -> str:
             st.session_state.pop(k, None)
         st.rerun()
     return selected
-
-
-# ══════════════════════════════════════════════════════════════════════
-#  PAGE: HOME
-# ══════════════════════════════════════════════════════════════════════
 
 def page_home() -> None:
     st.title("Home")
@@ -388,11 +368,6 @@ def page_home() -> None:
     DBMS: **PostgreSQL 16**. Deployment: **Docker Compose**.
     """)
 
-
-# ══════════════════════════════════════════════════════════════════════
-#  PAGE: BROWSE TABLES
-# ══════════════════════════════════════════════════════════════════════
-
 def page_tables() -> None:
     st.title("Browse tables")
     allowed = ROLE_ALLOWED_TABLES.get(role(), [])
@@ -424,10 +399,6 @@ def page_tables() -> None:
         st.info("Table is empty or not available for your role.")
 
 
-# ══════════════════════════════════════════════════════════════════════
-#  PAGE: QUERIES
-# ══════════════════════════════════════════════════════════════════════
-
 def page_queries() -> None:
     st.title("Database queries")
     st.caption("13 queries with sorting, grouping, calculations and table joins.")
@@ -442,8 +413,6 @@ def page_queries() -> None:
 
 
 def _render_query(idx: int) -> None:  # noqa: C901
-
-    # ──── Query 1 ──────────────────────────────────────────────────────
     if idx == 1:
         st.subheader("1. Passengers on a specific flight")
         st.caption(
@@ -467,7 +436,6 @@ def _render_query(idx: int) -> None:  # noqa: C901
                 ORDER BY p.last_name, p.first_name;
             """, (flight_no,)))
 
-    # ──── Query 2 ──────────────────────────────────────────────────────
     elif idx == 2:
         st.subheader("2. Flight schedule for a specific date")
         st.caption(
@@ -487,7 +455,6 @@ def _render_query(idx: int) -> None:  # noqa: C901
                 ORDER BY f.depart_at;
             """, (d,)))
 
-    # ──── Query 3 ──────────────────────────────────────────────────────
     elif idx == 3:
         st.subheader("3. Flights of a specific airline")
         st.caption(
@@ -517,7 +484,6 @@ def _render_query(idx: int) -> None:  # noqa: C901
                 ORDER BY f.depart_at;
             """, (al_opts[al_label],)))
 
-    # ──── Query 4 ──────────────────────────────────────────────────────
     elif idx == 4:
         st.subheader("4. Number of free seats on a specific flight")
         st.caption(
@@ -556,7 +522,6 @@ def _render_query(idx: int) -> None:  # noqa: C901
                 m3.metric("Free",     int(row["free_seats"]))
                 st.dataframe(res, width="stretch")
 
-    # ──── Query 5 ──────────────────────────────────────────────────────
     elif idx == 5:
         st.subheader("5. Crew of a specific flight")
         st.caption(
@@ -587,7 +552,6 @@ def _render_query(idx: int) -> None:  # noqa: C901
                 ORDER BY e.position, e.last_name;
             """, (f_opts[f_label],)))
 
-    # ──── Query 6 ──────────────────────────────────────────────────────
     elif idx == 6:
         st.subheader("6. Delayed and cancelled flights over a period")
         st.caption(
@@ -609,7 +573,6 @@ def _render_query(idx: int) -> None:  # noqa: C901
                 ORDER BY f.depart_at;
             """, (d1, d2)))
 
-    # ──── Query 7 ──────────────────────────────────────────────────────
     elif idx == 7:
         st.subheader("7. Aircraft usage history over a period")
         st.caption(
@@ -642,7 +605,6 @@ def _render_query(idx: int) -> None:  # noqa: C901
                 ORDER BY f.depart_at;
             """, (ac_opts[ac_label], d1, d2)))
 
-    # ──── Query 8 ──────────────────────────────────────────────────────
     elif idx == 8:
         st.subheader("8. Average ticket price by service class")
         st.caption(
@@ -665,7 +627,6 @@ def _render_query(idx: int) -> None:  # noqa: C901
                 st.bar_chart(res.set_index("service_class")["avg_price"].astype(float),
                              height=220, color="#4f8ef7")
 
-    # ──── Query 9 ──────────────────────────────────────────────────────
     elif idx == 9:
         st.subheader("9. Top 5 passengers by total ticket spend")
         st.caption(
@@ -683,7 +644,6 @@ def _render_query(idx: int) -> None:  # noqa: C901
                 LIMIT 5;
             """))
 
-    # ──── Query 10 ─────────────────────────────────────────────────────
     elif idx == 10:
         st.subheader("10. Flights with seats still available")
         st.caption(
@@ -708,7 +668,6 @@ def _render_query(idx: int) -> None:  # noqa: C901
                 ORDER BY f.depart_at;
             """))
 
-    # ──── Query 11 ─────────────────────────────────────────────────────
     elif idx == 11:
         st.subheader("11. Number of flights by status")
         st.caption("`GROUP BY status` + `COUNT(*)`. Simple aggregation query.")
@@ -723,7 +682,6 @@ def _render_query(idx: int) -> None:  # noqa: C901
             if not res.empty:
                 st.bar_chart(res.set_index("status")["num_flights"], height=220)
 
-    # ──── Query 12 ─────────────────────────────────────────────────────
     elif idx == 12:
         st.subheader("12. Passengers without a middle name")
         st.caption(
@@ -741,7 +699,6 @@ def _render_query(idx: int) -> None:  # noqa: C901
                 ORDER BY last_name;
             """))
 
-    # ──── Query 13 ─────────────────────────────────────────────────────
     elif idx == 13:
         st.subheader("13. Employees with no flight assignments")
         st.caption(
@@ -761,9 +718,7 @@ def _render_query(idx: int) -> None:  # noqa: C901
                 ORDER BY e.last_name;
             """))
 
-# ══════════════════════════════════════════════════════════════════════
 #  REPORTS — helper functions
-# ══════════════════════════════════════════════════════════════════════
 
 def _report_flights() -> None:
     st.subheader("Flight load report")
@@ -796,7 +751,6 @@ def _report_flights() -> None:
                 res.set_index("flight_number")["load_pct"].astype(float),
                 height=280, color="#22c55e",
             )
-
 
 def _report_employees() -> None:
     st.subheader("Employee report")
@@ -875,11 +829,6 @@ def page_reports() -> None:
         with widget:
             render_fn()
 
-
-# ══════════════════════════════════════════════════════════════════════
-#  AIRCRAFT LOCATION
-# ══════════════════════════════════════════════════════════════════════
-
 def _aircraft_location(tail_number: str) -> str:
     """Return the aircraft's current location based on its latest flight.
 
@@ -929,11 +878,6 @@ def _aircraft_location(tail_number: str) -> str:
 
     return "Unknown (no flights)"
 
-
-# ══════════════════════════════════════════════════════════════════════
-#  PAGE: MANAGE DATA
-# ══════════════════════════════════════════════════════════════════════
-
 def page_manage() -> None:
     st.title("Manage data")
     st.caption("Available operations depend on your role.")
@@ -967,10 +911,7 @@ def page_manage() -> None:
         with widget:
             render_fn()
 
-
-# ──────────────────────────────────────────────────────────────────────
-#  Tabs: DISPATCHER
-# ──────────────────────────────────────────────────────────────────────
+#Tabs: dispatcher
 
 def _tab_add_flight() -> None:
     st.subheader("Add a new flight")
@@ -1157,11 +1098,7 @@ def _tab_assign_crew() -> None:
         else:
             st.error(err)
 
-
-# ──────────────────────────────────────────────────────────────────────
 #  Tabs: CASHIER
-# ──────────────────────────────────────────────────────────────────────
-
 def _valid_phone(s: str) -> bool:
     """International phone: optional leading +, then 8–15 digits."""
     return re.fullmatch(r"\+?\d{8,15}", re.sub(r"[\s()\-]", "", s)) is not None
@@ -1337,7 +1274,7 @@ def _tab_add_ticket() -> None:
             else:
                 st.error(f"Error: {err}")
 
-    # ── Cancel (delete) a ticket ──────────────────────────────────────
+    #Cancel (delete) a ticket
     st.divider()
     st.subheader("Cancel a ticket")
     sold = query_df("""
@@ -1412,11 +1349,7 @@ def _tab_update_passenger() -> None:
                 else:
                     st.error(err)
 
-
-# ──────────────────────────────────────────────────────────────────────
-#  Tabs: ADMINISTRATOR
-# ──────────────────────────────────────────────────────────────────────
-
+#Tabs: ADMINISTRATOR
 def _tab_add_airline() -> None:
     st.subheader("Add an airline")
 
@@ -1459,7 +1392,7 @@ def _tab_add_airline() -> None:
     airlines = query_df("SELECT * FROM airline ORDER BY name;")
     st.dataframe(airlines, width="stretch")
 
-    # ── Delete an airline ─────────────────────────────────────────────
+    #Delete an airline
     st.subheader("Delete an airline")
     if airlines.empty:
         st.info("No airlines yet.")
@@ -1483,7 +1416,6 @@ def _tab_add_airline() -> None:
                 "Delete or reassign its aircraft first.\n\n"
                 f"Details: {err}"
             )
-
 
 def _tab_add_aircraft() -> None:
     st.subheader("Add an aircraft")
@@ -1528,7 +1460,7 @@ def _tab_add_aircraft() -> None:
         aircrafts["location"] = aircrafts["tail_number"].apply(_aircraft_location)
     st.dataframe(aircrafts, width="stretch")
 
-    # ── Delete an aircraft ────────────────────────────────────────────
+    #Delete an aircraft
     st.subheader("Delete an aircraft")
     if aircrafts.empty:
         st.info("No aircraft yet.")
@@ -1556,7 +1488,6 @@ def _tab_add_aircraft() -> None:
 
 # Allowed employee positions (must match chk_position in the schema)
 EMPLOYEE_POSITIONS = ["pilot", "co-pilot", "flight attendant"]
-
 
 def _tab_add_employee() -> None:
     st.subheader("Register a new employee")
@@ -1614,10 +1545,7 @@ def _tab_add_employee() -> None:
         width="stretch",
     )
 
-
-# ══════════════════════════════════════════════════════════════════════
-#  PAGE: SECURITY (Administrator only)
-# ══════════════════════════════════════════════════════════════════════
+#page: security (Administrator only)
 
 def page_security() -> None:
     st.title("Database security")
@@ -1646,9 +1574,8 @@ def page_security() -> None:
     st.divider()
     with st.expander("View code: 02_users.sql"):
         st.code("""
--- ═══════════════════════════════════════════════════════
+
 --  02_users.sql — Create users and assign privileges
--- ═══════════════════════════════════════════════════════
 
 -- ── Administrator ──────────────────────────────────────
 CREATE USER admin_user WITH PASSWORD 'admin_pass_2024' CREATEDB CREATEROLE;
@@ -1716,10 +1643,7 @@ GRANT USAGE, SELECT ON SEQUENCE
     - **Containerization** via Docker — the database is isolated from the host OS.
     """)
 
-
-# ══════════════════════════════════════════════════════════════════════
-#  ENTRY POINT
-# ══════════════════════════════════════════════════════════════════════
+#entry point
 
 def main() -> None:
     if "role" not in st.session_state:
@@ -1737,7 +1661,6 @@ def main() -> None:
         "Security": page_security,
     }
     dispatch.get(page, page_home)()
-
 
 if __name__ == "__main__":
     main()
